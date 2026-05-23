@@ -31,7 +31,7 @@ Standard recursive machine learning forecasts suffer from the **"absorbing dry s
 
 ## 📁 File Manifest & Workspace Map
 
-* **`hornsby_rainfall_predication_v2.ipynb`**: The master Jupyter Notebook containing the clean end-to-end interactive code, exploratory data analysis, and visual climate comparisons.
+* **`hornsby_rainfall_prediction_v2.ipynb`**: The master Jupyter Notebook containing the clean end-to-end interactive code, exploratory data analysis, and visual climate comparisons.
 * **`refresh_pipeline.py`**: The one-click terminal automation script. Automatically refreshes all models, CSV files, and re-compiles the Jupyter Notebook when new data is added.
 * **`hornsby_rainfall_prediction.py`**: The core Python pipeline containing the Hurdle modeling, Prophet fitting, and recursive stochastic simulators.
 * **`visualize_forecast.py`**: Independent visualization script for generating high-definition, dark-mode forecast charts.
@@ -48,7 +48,7 @@ Standard recursive machine learning forecasts suffer from the **"absorbing dry s
 
 This project provides multiple entry points for different workflows. Here's a comprehensive comparison:
 
-| Aspect | `hornsby_rainfall_prediction.py` | `visualize_forecast.py` | `hornsby_rainfall_predication_v2.ipynb` |
+| Aspect | `hornsby_rainfall_prediction.py` | `visualize_forecast.py` | `hornsby_rainfall_prediction_v2.ipynb` |
 |--------|------|------|------|
 | **Execution Type** | Standalone Python Script | Standalone Python Script | Jupyter Notebook |
 | **Run Command** | `python hornsby_rainfall_prediction.py` | `python visualize_forecast.py` | Run cells interactively in Jupyter |
@@ -64,7 +64,7 @@ This project provides multiple entry points for different workflows. Here's a co
 **For Initial Exploration & Learning:**
 ```bash
 # Start with the Notebook to understand the full pipeline interactively
-jupyter notebook hornsby_rainfall_predication_v2.ipynb
+jupyter notebook hornsby_rainfall_prediction_v2.ipynb
 ```
 
 **For Scheduled Automated Forecasting:**
@@ -146,7 +146,7 @@ When BOM releases a new month's weather observations (e.g. transitioning from Ap
    ```bash
    .venv/bin/python refresh_pipeline.py
    ```
-This single command automatically parses the new boundary, fits the predictive models to the newly expanded history, runs the 365-day stochastic forecasts starting the day after your new data ends, saves the data, regenerates the warning-free dashboard plots, and re-compiles the Jupyter Notebook (`hornsby_rainfall_predication_v2.ipynb`)!
+This single command automatically parses the new boundary, fits the predictive models to the newly expanded history, runs the 365-day stochastic forecasts starting the day after your new data ends, saves the data, regenerates the warning-free dashboard plots, and re-compiles the Jupyter Notebook (`hornsby_rainfall_prediction_v2.ipynb`)!
 
 ---
 

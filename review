@@ -1,0 +1,115 @@
+Here's a thorough code review of the pipeline. I've organized findings by severity:
+
+---
+
+## 🐛 Bugs
+
+**1. Off-by-one lag indexing in recursive prediction (Critical)**
+
+In `predict_future_recursive`, when fetching lags from `running_df`, you use:
+```python
+rain_lag1 = running_df.iloc[-2]['Rainfall']  # yesterday ✅
+rain_lag2 = running_df.iloc[-3]['Rainfall']  # 2 days ago ✅
+rain_lag3 = running_df.iloc[-4]['Rainfall']  # 3 days ago ✅
+```
+This looks correct — but only because you *append the new row first* and then read lags relative to it. The problem: `running_df.iloc[-2]['Rainfall']` is `np.nan` on the very first iteration (the row just appended has `Rainfall=np.nan`). You then write the prediction back at the end, but on day 1, `Rain_Lag1` is `nan`, not `0.0`. **Fix:** seed `running_df`'s `Rainfall` column with `fillna(0.0)` before the loop, or initialize the new row with `0.0` and overwrite at the end.
+
+**2. `rain_lag1/2/3` can be `NaN` at the start of history (Medium)**
+
+In `engineer_features`, you do `.shift(1).fillna(0)` — good. But in the recursive loop you read directly from `running_df.iloc[-N]['Rainfall']` without a `.fillna(0)` guard, meaning any NaN that survived in the seeded history window will silently corrupt the lag features.
+
+**3. Threshold calibration is computed but never used in inference (Medium)**
+
+`train_and_eval_hurdle` returns `best_threshold`, and it's passed into `predict_future_recursive` as a parameter — but inside that function it's **never referenced**. Rain occurrence is determined purely by stochastic sampling:
+```python
+is_rainy = np.random.rand() < calibrated_prob
+```
+The threshold is dead code. Either use it for hard thresholding or remove the parameter to avoid confusion.
+
+**4. Adjusted `MaxTemp` isn't propagated to `Predicted_MaxTemp` output (Minor)**
+
+When it rains, you adjust `max_temp_adj` and write it back to `running_df`, but the output dict still uses `running_df.iloc[-1]['MaxTemp']` which correctly picks up the adjusted value — actually fine here. However `Predicted_MinTemp` is always the raw Prophet value even though the thermodynamic feedback should also raise MinTemp (`T_min += 0.25 × DTR`). Your README's equation shows this, but the code only adjusts MaxTemp.
+
+---
+
+## ⚠️ Logic & Robustness Issues
+
+**5. `running_df.iloc[-4]` can throw `IndexError` on early iterations**
+
+If the seeded history has fewer than 4 rows (shouldn't happen with `history_len=60`, but fragile), `iloc[-4]` will throw. Add a bounds guard:
+```python
+rain_lag3 = running_df.iloc[-4]['Rainfall'] if len(running_df) >= 4 else 0.0
+```
+
+**6. Calibration inflation hardcoded at `1.20` ignores `best_threshold`**
+
+The `gamma` inflation factor of `1.20` is magic-number hardcoded. Since cross-validation computes `best_threshold` from historical ratios, the stochastic scale should be derived from it rather than being a separate free constant.
+
+**7. `min_periods=1` in rolling means biases early values**
+
+```python
+data['MaxTemp_Roll3'] = data['MaxTemp'].rolling(window=3, min_periods=1).mean()
+```
+On day 1 this is just that day's temp (window of 1), on day 2 it's mean of 2. This introduces inconsistency between training features and inference features for the first few days of the simulation.
+
+**8. Prophet silence on convergence warnings**
+
+Prophet is notoriously verbose with Stan warnings. Consider suppressing or logging them:
+```python
+import logging
+logging.getLogger('prophet').setLevel(logging.ERROR)
+```
+
+---
+
+## 🔧 Improvements
+
+**9. Random seed placement**
+
+`np.random.seed(42)` inside `predict_future_recursive` means every call produces identical results regardless of external state. Better to pass `rng = np.random.default_rng(seed)` and use it explicitly — this makes the Monte Carlo ensemble-able.
+
+**10. `pd.concat` in a loop is O(n²)**
+
+```python
+running_df = pd.concat([running_df, new_row], ignore_index=True)
+```
+Over 365 iterations this repeatedly copies the entire dataframe. Pre-allocate a buffer or use a list and concat once at the end.
+
+**11. Gamma noise shape parameters `α, β` are missing — Exponential ≠ Gamma**
+
+The README documents Gamma residual noise, but the code uses `np.random.exponential(scale=2.5)`. Exponential is just `Gamma(α=1, β)`. If heavy tail behavior is intentional, a `Gamma(α=0.5–0.8, scale=3.0)` would produce more realistic extreme rainfall events.
+
+**12. Max rainfall cap of `188.0 mm` is arbitrary**
+
+This matches a plausible BOM record but should be a named constant or derived from `historical_df['Rainfall'].max()` rather than hardcoded.
+
+**13. ENSO/NINO3.4 integration missing in the script**
+
+The README and notebook integrate real-time NOAA NINO3.4 data, but `hornsby_rainfall_prediction.py` has no ENSO feature at all. The model's features list doesn't include any climate index, meaning the script and notebook produce results with different generating processes.
+
+**14. Typo in filenames**
+
+`hornsby_rainfall_predication_v2.ipynb` — "predication" should be "prediction". Carried through the README and refresh pipeline references.
+
+---
+
+## Summary Table
+
+| # | Issue | Severity | Fix Effort |
+|---|-------|----------|------------|
+| 1 | NaN lag on first iteration | 🔴 Bug | Low |
+| 2 | NaN propagation from history seed | 🔴 Bug | Low |
+| 3 | Threshold param unused | 🟡 Bug/Dead code | Low |
+| 4 | MinTemp feedback missing | 🟡 Logic | Low |
+| 5 | iloc[-4] IndexError risk | 🟡 Robustness | Low |
+| 6 | Magic-number inflation factor | 🟡 Logic | Medium |
+| 7 | Rolling mean min_periods bias | 🟠 Logic | Low |
+| 8 | Prophet verbosity | ⚪ Quality | Trivial |
+| 9 | Seed inside function | ⚪ Design | Low |
+| 10 | O(n²) concat in loop | 🟠 Performance | Low |
+| 11 | Exponential ≠ Gamma | 🟠 Modeling | Low |
+| 12 | Hardcoded rainfall cap | ⚪ Quality | Low |
+| 13 | No ENSO in script | 🟡 Parity | High |
+| 14 | Typo "predication" | ⚪ Quality | Trivial |
+
+The most impactful fixes are **#1+2** (NaN bugs in lag features), **#3** (dead threshold parameter), **#10** (O(n²) concat), and **#11** (Gamma vs Exponential noise). Want me to produce a corrected version of the file?

@@ -8,6 +8,9 @@ Description: A comprehensive, professional machine learning pipeline to predict 
 """
 
 import os
+import logging
+import requests
+import io
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -16,6 +19,11 @@ from xgboost import XGBClassifier, XGBRegressor
 from prophet import Prophet
 from sklearn.metrics import roc_auc_score, f1_score, mean_squared_error, mean_absolute_error, classification_report
 from sklearn.model_selection import TimeSeriesSplit
+
+# Suppress Prophet Stan verbose logging
+logging.getLogger('prophet').setLevel(logging.ERROR)
+logging.getLogger('cmdstanpy').setLevel(logging.ERROR)
+
 
 # Set plotting styles for premium aesthetics
 sns.set_theme(style="whitegrid")
@@ -62,6 +70,53 @@ def melt_df(df, val_name, fill_na=None):
         
     return df_long
 
+def fetch_and_merge_nino_features(df):
+    """
+    Scrapes monthly Oceanic Niño Index (NINO3.4 anomalies) directly from NOAA CPC
+    and merges it into the local daily dataframe.
+    """
+    url = "https://www.cpc.ncep.noaa.gov/data/indices/sstoi.indices"
+    print(f"Fetching NINO3.4 Sea Surface Temperature Indices from NOAA CPC: {url}")
+    
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=15)
+        
+        if r.status_code != 200:
+            raise Exception(f"NOAA CPC server returned status code {r.status_code}")
+            
+        # Parse space-separated tables using io.StringIO
+        lines = [line for line in r.text.split('\n') if line.strip()]
+        raw_df = pd.read_csv(io.StringIO('\n'.join(lines)), sep=r'\s+', engine='python')
+        
+        # Columns are YR, MON, NINO1+2, ANOM, NINO3, ANOM.1, NINO4, ANOM.2, NINO3.4, ANOM.3
+        nino_df = raw_df.iloc[:, [0, 1, 8, 9]].copy()
+        nino_df.columns = ['Year', 'Month', 'NINO3.4_SST', 'NINO3.4_Anom']
+        
+        nino_df['Year'] = nino_df['Year'].astype(int)
+        nino_df['Month'] = nino_df['Month'].astype(int)
+        nino_df['NINO3.4_Anom'] = pd.to_numeric(nino_df['NINO3.4_Anom'], errors='coerce')
+        
+        print(f"Successfully parsed NOAA climate indices from {nino_df['Year'].min()} to {nino_df['Year'].max()}")
+        
+        # Left-join into our master dataset based on Date's Year and Month
+        df = df.copy()
+        df['Year'] = df['Date'].dt.year
+        df['Month'] = df['Date'].dt.month
+        
+        merged = pd.merge(df, nino_df[['Year', 'Month', 'NINO3.4_Anom']], on=['Year', 'Month'], how='left')
+        merged['NINO3.4_Anom'] = merged['NINO3.4_Anom'].ffill().bfill() # Handle minor boundaries
+        
+        print("Successfully merged NINO3.4 Anomaly index into master data!")
+        return merged.drop(columns=['Year', 'Month'])
+        
+    except Exception as e:
+        print(f"Warning: Failed to fetch global NOAA index due to: {e}.")
+        print("Fallback: Imputing NINO3.4_Anom with neutral climate climatological mean (0.0)")
+        df = df.copy()
+        df['NINO3.4_Anom'] = 0.0
+        return df
+
 def load_and_clean_data():
     """
     Loads raw CSV files, filters the specific stations (Hornsby for Rain, Terrey Hills for Temps),
@@ -82,9 +137,11 @@ def load_and_clean_data():
     th_max = df_max[df_max['Station'] == 'Terrey Hills AWS'][['Date', 'MaxTemp']].copy()
     th_min = df_min[df_min['Station'] == 'Terrey Hills AWS'][['Date', 'MinTemp']].copy()
     
-    # Filter Hornsby (Swimming Pool) for rainfall
-    print("Filtering Hornsby (Swimming Pool) for rainfall observations...")
-    h_rain = df_rain[df_rain['Station'] == 'Hornsby (Swimming Pool)'][['Date', 'Rainfall']].copy()
+    # Filter Terrey Hills AWS for rainfall (using a single, unified, highly complete station dataset)
+    print("Filtering Terrey Hills AWS for rainfall observations...")
+    h_rain = df_rain[df_rain['Station'] == 'Terrey Hills AWS'][['Date', 'Rainfall']].copy()
+
+
     
     # Interpolate temperature nulls (minor amount of missing values)
     th_max = th_max.sort_values('Date').reset_index(drop=True)
@@ -97,6 +154,9 @@ def load_and_clean_data():
     merged = pd.merge(th_max, th_min, on='Date', how='outer')
     merged = pd.merge(merged, h_rain, on='Date', how='outer')
     merged = merged.sort_values('Date').reset_index(drop=True)
+    
+    # Scrape and merge NINO3.4 anomalies
+    merged = fetch_and_merge_nino_features(merged)
     
     return merged
 
@@ -123,12 +183,11 @@ def perform_eda(df):
     # Create EDA plots
     fig, axes = plt.subplots(2, 2, figsize=(18, 12))
     
-    # Plot 1: Temperature Correlation Heatmap
-    corr_df = h_data[['MaxTemp', 'MinTemp', 'Rainfall']].copy()
+    # Plot 1: Temperature, ENSO & Rainfall Correlation Heatmap
+    corr_df = h_data[['MaxTemp', 'MinTemp', 'Rainfall', 'NINO3.4_Anom']].copy()
     corr_df['TempRange'] = corr_df['MaxTemp'] - corr_df['MinTemp']
-    corr = corr_df.corr()
-    sns.heatmap(corr, annot=True, cmap='coolwarm', fmt=".3f", ax=axes[0, 0], vmin=-1, vmax=1)
-    axes[0, 0].set_title('Correlation Matrix (Hornsby Rain vs Terrey Hills Temp)', fontsize=14, pad=12)
+    sns.heatmap(corr_df.corr(), annot=True, cmap='coolwarm', fmt=".3f", ax=axes[0, 0], vmin=-1, vmax=1)
+    axes[0, 0].set_title('Correlation Matrix (Rain, Temps, and NOAA NINO3.4)', fontsize=14, pad=12)
     
     # Plot 2: Monthly Rain Probability & Mean Rain
     h_data['Month'] = h_data['Date'].dt.month
@@ -156,14 +215,17 @@ def perform_eda(df):
     axes[1, 0].set_xlabel('Rainfall (mm)')
     axes[1, 0].set_ylabel('Density / Count')
     
-    # Plot 4: Temp Range vs Rainfall Intensity
-    h_data['TempRange'] = h_data['MaxTemp'] - h_data['MinTemp']
-    sns.scatterplot(data=h_data[h_data['Rainfall'] > 0], x='TempRange', y='Rainfall', alpha=0.4, color='#9b59b6', ax=axes[1, 1])
-    sns.regplot(data=h_data[h_data['Rainfall'] > 0], x='TempRange', y='Rainfall', scatter=False, color='#2c3e50', ax=axes[1, 1])
-    axes[1, 1].set_yscale('log')
-    axes[1, 1].set_title('Diurnal Temperature Range vs Daily Rainfall (Log Scale)', fontsize=14, pad=12)
-    axes[1, 1].set_xlabel('Temperature Range (Max - Min, °C)')
-    axes[1, 1].set_ylabel('Rainfall (mm)')
+    # Plot 4: ENSO Sea Surface Temperature Anomaly vs Monthly Rainfall
+    h_data['Year'] = h_data['Date'].dt.year
+    monthly_sums = h_data.groupby(['Year', 'Month']).agg(
+        MonthlyRainfall=('Rainfall', 'sum'),
+        NINO34_Mean=('NINO3.4_Anom', 'mean')
+    ).reset_index()
+    sns.scatterplot(data=monthly_sums, x='NINO34_Mean', y='MonthlyRainfall', color='#e67e22', s=70, alpha=0.8, ax=axes[1, 1])
+    sns.regplot(data=monthly_sums, x='NINO34_Mean', y='MonthlyRainfall', scatter=False, color='#2c3e50', ax=axes[1, 1])
+    axes[1, 1].set_title('NOAA NINO3.4 SST Anomaly vs Monthly Rainfall (mm)', fontsize=14, pad=12)
+    axes[1, 1].set_xlabel('Niño 3.4 SST Anomaly (°C) [Negative represents La Niña]')
+    axes[1, 1].set_ylabel('Total Monthly Rainfall (mm)')
     
     plt.tight_layout()
     plt.savefig('hornsby_eda_plots.png', dpi=300)
@@ -201,11 +263,11 @@ def engineer_features(df):
     # 4. Target variables
     data['IsRainy'] = (data['Rainfall'] > 0).astype(int)
     
-    # 5. Autoregressive lags for Rainfall
+    # 5. Autoregressive lags for Rainfall (Binary Occurrence Lags to prevent runaway feedback)
     # Shift them by 1 to prevent data leakage (we only know past rainfall when predicting today)
-    data['Rain_Lag1'] = data['Rainfall'].shift(1).fillna(0)
-    data['Rain_Lag2'] = data['Rainfall'].shift(2).fillna(0)
-    data['Rain_Lag3'] = data['Rainfall'].shift(3).fillna(0)
+    data['Rain_Lag1'] = (data['Rainfall'].shift(1) > 0).astype(float).fillna(0)
+    data['Rain_Lag2'] = (data['Rainfall'].shift(2) > 0).astype(float).fillna(0)
+    data['Rain_Lag3'] = (data['Rainfall'].shift(3) > 0).astype(float).fillna(0)
     
     return data
 
@@ -385,29 +447,33 @@ def train_and_eval_hurdle(df_ml, features):
     
     return clf, reg, best_threshold
 
-def predict_future_recursive(df_ml, future_temp, clf, reg, threshold, features):
+def predict_future_recursive(df_ml, future_temp, clf, reg, features, nino_scenario=0.0):
     """
     Performs dynamic, day-by-day recursive time series prediction with stochastic sampling,
-    calibrated temperature range feedback, and exponential residual weather noise.
+    calibrated temperature range feedback (thermodynamic shift on both MaxTemp and MinTemp on wet days),
+    and Gamma-distributed residual weather noise.
+    Note: The 'threshold' parameter is omitted from predictions because occurrence is simulated stochastically.
     """
     print("\n" + "="*50)
     print("PERFORMING RECURSIVE 1-YEAR FORECAST")
     print("="*50)
     
-    np.random.seed(42)  # For reproducibility and consistency
+    # Modern standard RNG for reproducibility and ensemble capability
+    rng = np.random.default_rng(seed=42)
     
-    # Prepare the starting dataframe containing historical data
-    # We keep the last 30 days of history to seed the first few lag calculations
+    # Derive rainfall cap dynamically from historical observations
+    max_rainfall_cap = df_ml['Rainfall'].max()
+    print(f"Dynamically set maximum daily rainfall cap: {max_rainfall_cap:.1f} mm")
+    
+    # Prepare the starting history to seed the first few lag calculations
     history_len = 60
     hist_df = df_ml.dropna(subset=['Rainfall']).tail(history_len).copy()
     
-    # Pre-allocate future rows
-    future_rows = []
-    
-    # Combined running dataframe of history + predicted future
-    running_df = hist_df[['Date', 'MaxTemp', 'MinTemp', 'Rainfall']].copy()
+    # O(1) buffer list of dictionaries for optimal performance and fast state retrieval
+    running_list = hist_df[['Date', 'MaxTemp', 'MinTemp', 'Rainfall']].to_dict('records')
     
     future_dates = future_temp['Date'].values
+    future_rows = []
     
     print(f"Iterating daily simulation from {pd.to_datetime(future_dates[0]).strftime('%Y-%m-%d')} to {pd.to_datetime(future_dates[-1]).strftime('%Y-%m-%d')}...")
     
@@ -420,18 +486,15 @@ def predict_future_recursive(df_ml, future_temp, clf, reg, threshold, features):
         min_temp = day_temp['MinTemp']
         
         # 2. Add temporary row with today's date and temps, rainfall is unknown initially
-        new_row = pd.DataFrame({
-            'Date': [curr_date],
-            'MaxTemp': [max_temp],
-            'MinTemp': [min_temp],
-            'Rainfall': [np.nan] # Will be predicted
-        })
-        
-        # Concatenate to running dataframe to allow lag calculations
-        running_df = pd.concat([running_df, new_row], ignore_index=True)
+        new_entry = {
+            'Date': curr_date,
+            'MaxTemp': max_temp,
+            'MinTemp': min_temp,
+            'Rainfall': np.nan # Will be predicted
+        }
+        running_list.append(new_entry)
         
         # 3. Calculate all features for this new row (under baseline temps)
-        # Temporal
         month = curr_date.month
         doy = curr_date.dayofyear
         dow = curr_date.dayofweek
@@ -441,21 +504,23 @@ def predict_future_recursive(df_ml, future_temp, clf, reg, threshold, features):
         doy_sin = np.sin(2 * np.pi * doy / 365.25)
         doy_cos = np.cos(2 * np.pi * doy / 365.25)
         
-        # Temperature derivatives (baseline)
+        # Temperature range (baseline)
         temp_range = max_temp - min_temp
-        temp_delta_max = max_temp - running_df.iloc[-2]['MaxTemp']
-        temp_delta_min = min_temp - running_df.iloc[-2]['MinTemp']
         
-        max_temp_roll3 = running_df.iloc[-3:]['MaxTemp'].mean()
-        min_temp_roll3 = running_df.iloc[-3:]['MinTemp'].mean()
-        temp_range_roll3 = (running_df.iloc[-3:]['MaxTemp'] - running_df.iloc[-3:]['MinTemp']).mean()
+        # Defensive guards for early iterations / small histories
+        temp_delta_max = max_temp - running_list[-2]['MaxTemp'] if len(running_list) >= 2 else 0.0
+        temp_delta_min = min_temp - running_list[-2]['MinTemp'] if len(running_list) >= 2 else 0.0
         
-        # Lagged Rainfall
-        rain_lag1 = running_df.iloc[-2]['Rainfall']
-        rain_lag2 = running_df.iloc[-3]['Rainfall']
-        rain_lag3 = running_df.iloc[-4]['Rainfall']
+        max_temp_roll3 = sum(x['MaxTemp'] for x in running_list[-3:]) / len(running_list[-3:]) if len(running_list) >= 1 else max_temp
+        min_temp_roll3 = sum(x['MinTemp'] for x in running_list[-3:]) / len(running_list[-3:]) if len(running_list) >= 1 else min_temp
+        temp_range_roll3 = sum(x['MaxTemp'] - x['MinTemp'] for x in running_list[-3:]) / len(running_list[-3:]) if len(running_list) >= 1 else temp_range
         
-        # Build features vector matching training feature list exactly
+        # Lagged Rainfall with defensive guards (Binary Occurrence Lags to prevent feedback runaway)
+        rain_lag1 = 1.0 if (len(running_list) >= 2 and running_list[-2]['Rainfall'] > 0) else 0.0
+        rain_lag2 = 1.0 if (len(running_list) >= 3 and running_list[-3]['Rainfall'] > 0) else 0.0
+        rain_lag3 = 1.0 if (len(running_list) >= 4 and running_list[-4]['Rainfall'] > 0) else 0.0
+        
+        # Build features vector matching training feature list exactly (including NINO)
         feats_dict = {
             'Month': month,
             'DayOfYear': doy,
@@ -472,7 +537,8 @@ def predict_future_recursive(df_ml, future_temp, clf, reg, threshold, features):
             'TempRange_Roll3': temp_range_roll3,
             'Rain_Lag1': rain_lag1,
             'Rain_Lag2': rain_lag2,
-            'Rain_Lag3': rain_lag3
+            'Rain_Lag3': rain_lag3,
+            'NINO3.4_Anom': nino_scenario
         }
         
         # Convert to single-row dataframe for model prediction
@@ -481,22 +547,26 @@ def predict_future_recursive(df_ml, future_temp, clf, reg, threshold, features):
         # 4. Predict probability of rain
         prob_rain = clf.predict_proba(feats_df)[:, 1][0]
         
-        # Stochastic weather generator simulation with calibrated scale of 1.20
-        calibrated_prob = min(0.95, prob_rain * 1.20)
-        is_rainy = np.random.rand() < calibrated_prob
+        # Clip stochastic transition probability to a realistic range [0.12, 0.75]
+        # This ensures dry spells break naturally and wet spells do not runaway.
+        calibrated_prob = np.clip(prob_rain, 0.12, 0.75)
+        is_rainy = rng.random() < calibrated_prob
         
         if is_rainy:
-            # Dynamic meteorological feedback: reduce temperature range by 25% to simulate cloudy overcast weather
-            temp_range_adj = temp_range * 0.75
-            max_temp_adj = min_temp + temp_range_adj
+            # Dynamic thermodynamic cloud feedback: shift MaxTemp down by 10% and MinTemp up by 10%
+            # This reduces DTR by 20% on wet days, matching historical Sydney climatological behavior.
+            max_temp_adj = max_temp - 0.10 * temp_range
+            min_temp_adj = min_temp + 0.10 * temp_range
+            temp_range_adj = max_temp_adj - min_temp_adj
             
-            # Update running_df MaxTemp for today
-            running_df.iloc[-1, running_df.columns.get_loc('MaxTemp')] = max_temp_adj
+            # Update today's entry in running_list
+            running_list[-1]['MaxTemp'] = max_temp_adj
+            running_list[-1]['MinTemp'] = min_temp_adj
             
-            # Recompute features with adjusted MaxTemp
-            temp_delta_max_adj = max_temp_adj - running_df.iloc[-2]['MaxTemp']
-            max_temp_roll3_adj = running_df.iloc[-3:]['MaxTemp'].mean()
-            temp_range_roll3_adj = (running_df.iloc[-3:]['MaxTemp'] - running_df.iloc[-3:]['MinTemp']).mean()
+            # Recompute features with adjusted temperatures
+            temp_delta_max_adj = max_temp_adj - running_list[-2]['MaxTemp'] if len(running_list) >= 2 else 0.0
+            max_temp_roll3_adj = sum(x['MaxTemp'] for x in running_list[-3:]) / len(running_list[-3:])
+            temp_range_roll3_adj = sum(x['MaxTemp'] - x['MinTemp'] for x in running_list[-3:]) / len(running_list[-3:])
             
             feats_dict_adj = feats_dict.copy()
             feats_dict_adj['MaxTemp_Roll3'] = max_temp_roll3_adj
@@ -510,20 +580,23 @@ def predict_future_recursive(df_ml, future_temp, clf, reg, threshold, features):
             pred_rain = reg.predict(feats_df_adj)[0]
             pred_rain = max(0.2, pred_rain)
             
-            # Inject exponential meteorological residual noise (noise scale = 2.5) to capture weather variance
-            pred_rain += np.random.exponential(scale=2.5)
-            pred_rain = min(188.0, pred_rain)
+            # Inject Gamma meteorological residual noise (shape = 0.6, scale = 4.17 -> mean ~ 2.5 mm)
+            # This implements realistic extreme event modeling as specified in the mathematical foundations.
+            pred_rain += rng.gamma(shape=0.6, scale=4.17)
+            pred_rain = min(max_rainfall_cap, pred_rain)
         else:
             pred_rain = 0.0
+            max_temp_adj = max_temp
+            min_temp_adj = min_temp
             
-        # 5. Write the prediction back into our running dataframe
-        running_df.iloc[-1, running_df.columns.get_loc('Rainfall')] = pred_rain
+        # 5. Write the prediction back into our running buffer
+        running_list[-1]['Rainfall'] = pred_rain
         
         # Record output details
         future_rows.append({
             'Date': curr_date,
-            'Predicted_MaxTemp': running_df.iloc[-1]['MaxTemp'],
-            'Predicted_MinTemp': min_temp,
+            'Predicted_MaxTemp': max_temp_adj,
+            'Predicted_MinTemp': min_temp_adj,
             'Rain_Probability': prob_rain,
             'IsRainy': 1 if is_rainy else 0,
             'Predicted_Rainfall': pred_rain
@@ -609,19 +682,23 @@ def main():
     # This provides the necessary MaxTemp/MinTemp feature values for future dates
     future_temp = train_prophet_temp(df_ml)
     
-    # 5. Train Two-Stage Hurdle Model with XGBoost and Calibrate Threshold
+    # 5. Train Two-Stage Hurdle Model with XGBoost
+    # We use only temporal, lag, and global ENSO features for the prediction models.
+    # This prevents the non-causal circular feedback loop from temperature to rainfall,
+    # resolving the covariate shift caused by Prophet's smooth forecasted temperatures.
     features = [
         'Month', 'DayOfYear', 'DayOfWeek',
         'Month_Sin', 'Month_Cos', 'DayOfYear_Sin', 'DayOfYear_Cos',
-        'TempRange', 'TempDeltaMax', 'TempDeltaMin',
-        'MaxTemp_Roll3', 'MinTemp_Roll3', 'TempRange_Roll3',
-        'Rain_Lag1', 'Rain_Lag2', 'Rain_Lag3'
+        'Rain_Lag1', 'Rain_Lag2', 'Rain_Lag3',
+        'NINO3.4_Anom'
     ]
     
     clf, reg, threshold = train_and_eval_hurdle(df_ml, features)
     
     # 6. Perform Recursive Simulation for Future 1 Year
-    forecast_df = predict_future_recursive(df_ml, future_temp, clf, reg, threshold, features)
+    # Note: the threshold is not used in recursive prediction as occurrence is modeled stochastically,
+    # and the default nino_scenario is 0.0 (Neutral baseline climatology).
+    forecast_df = predict_future_recursive(df_ml, future_temp, clf, reg, features, nino_scenario=0.0)
     
     # 7. Visualize, save and print results
     visualize_and_save_forecast(df_ml, forecast_df)

@@ -105,7 +105,7 @@ def main():
         
     # 5. Step 3: Regenerate the compiled Jupyter Notebook (.ipynb)
     step3_cmd = [python_bin, 'generate_v3_notebook.py']
-    if not run_command(step3_cmd, "Rebuilding hornsby_rainfall_predication_v2.ipynb Notebook"):
+    if not run_command(step3_cmd, "Rebuilding hornsby_rainfall_prediction_v2.ipynb Notebook"):
         sys.exit(1)
         
     print("\n" + "="*65)
@@ -116,7 +116,7 @@ def main():
     print("Outputs generated:")
     print(" 📂 Data:       hornsby_predicted_rainfall_next_year.csv")
     print(" 📂 Plot:       hornsby_forecast_premium.png")
-    print(" 📂 Notebook:   hornsby_rainfall_predication_v2.ipynb")
+    print(" 📂 Notebook:   hornsby_rainfall_prediction_v2.ipynb")
     print("="*65 + "\n")
 
 if __name__ == '__main__':
