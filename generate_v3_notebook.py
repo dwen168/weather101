@@ -139,6 +139,7 @@ notebook = {
    "cell_type": "code",
    "execution_count": None,
    "metadata": {},
+   "outputs": [],
    "source": [
     "def fetch_and_merge_nino_features(df):\n",
     "    \"\"\"\n",
