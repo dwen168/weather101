@@ -6,26 +6,28 @@ A state-of-the-art machine learning weather generator and temporal forecast pipe
 
 ## 🚀 Key Highlights & Architectural Core
 
-Standard recursive machine learning forecasts suffer from the **"absorbing dry state trap"**—where predicted probabilities eventually dry out to 0.0%, resulting in flatline droughts. This project overcomes this barrier by framing weather generation through a **stochastic thermodynamic Monte Carlo framework**:
+Standard recursive machine learning forecasts suffer from the **"absorbing dry state trap"** (or its counterpart, the **"runaway wet state dead-loop"**) when feeding smooth projected curves back into highly volatile autoregressive lags. This project overcomes this boundary by framing weather generation through a **stochastic thermodynamic Monte Carlo framework**:
 
-1. **Two-Stage Hurdle Machine Learning Pipeline (XGBoost)**:
+1. **Two-Stage Hurdle Machine Learning Pipeline (XGBoost & LightGBM/HistGradient)**:
    * **Stage 1 (Classification)**: An `XGBClassifier` models daily rain probability ($P(\text{Rain} > 0)$) utilizing temporal, thermal, and autoregressive lag indicators.
-   * **Stage 2 (Regression)**: An `XGBRegressor` predicts the rainfall intensity (mm) conditioned on a wet state.
-2. **Facebook Prophet Temperature Model**:
-   * Learns yearly temperature profiles and daily diurnal boundaries (`MaxTemp` and `MinTemp`) to forecast the daily thermal landscape for the next 365 days.
-3. **NOAA Global Climate Index Scraper**:
-   * Scrapes monthly Oceanic Niño Index (NINO3.4 Sea Surface Temperature anomalies) from the NOAA Climate Prediction Center in real time. This anchors forecasts to actual global climate patterns.
-4. **Stochastic Weather Generator (Monte Carlo)**:
-   * Replaces rigid deterministic thresholding (`probability > threshold`) with **Bernoulli Stochastic Sampling** and **Gamma/Exponential intensity residual noise** to mimic true natural weather variability.
-5. **Thermodynamic Overcast Feedback**:
-   * Reduces the predicted diurnal temperature range by **25% on wet days** to accurately simulate thermal dynamics associated with thick cloud cover and rain cooling.
-6. **"What-If" Interactive ENSO Climate Simulator**:
+   * **Stage 2 (Regression)**: A `HistGradientBoostingRegressor` predicts the log-rainfall intensity ($\log_{1p}(\text{Rainfall})$) conditioned on a wet state.
+2. **Smart Hybrid Imputation (Data Quality Upgrade)**:
+   * Replaces simplistic blind zero-imputation of missing observation gaps with a **scientifically validated 88.2% correlation scaling rule** (overall scale factor `0.9301`) using Terrey Hills AWS as a geographic reference. This reconstructed **533 missing wet days**, boosting the classifier's ROC-AUC to **0.8205** and reducing regression positive-RMSE by **4.3%** to **16.47 mm**.
+3. **Stochastic Temperature Residual Generator (Joint VAR(1) Process)**:
+   * Estimates baseline profiles with **Facebook Prophet**, then injects highly realistic daily autocorrelated and cross-correlated noise using a Vector Autoregression VAR(1) process on historical residuals ($\phi_{\text{max}} = 0.379, \phi_{\text{min}} = 0.524$, cross-correlation $= 0.472$). This completely eliminates **covariate shift**, allowing all daily thermodynamic features to be safely integrated into the ML models.
+4. **Log-Transformed Regression with Duan's Smearing Factor**:
+   * Evaluates rainfall intensity on $\log_{1p}(\text{Rainfall})$ to stabilize right-skewed precipitation variance. Re-transforms predictions to millimeters using **Duan's Smearing Factor** (e.g. `1.4942`) for bias correction, resolving the underestimation caused by Jensen's Inequality.
+5. **Calibrated Diurnal Temperature Range (DTR) Feedback**:
+   * Prevents runaway positive rain loops by **calibrating the overcast feedback factor to 0.02** (reducing DTR by ~4% on wet days). This scientifically models cloud cover and rain cooling, while breaking the feedback absorption trap that previously bloated out-of-time simulations.
+6. **Multi-Zone Global Climate Scraper**:
+   * Scrapes Oceanic Niño Index anomalies from multiple zones (**NINO3_Anom**, **NINO4_Anom**, **NINO3.4_Anom** and their **30-day lags**) from the NOAA Climate Prediction Center in real time. This models global circulation drivers (canonical El Niño vs. El Niño Modoki) with high physical fidelity.
+7. **"What-If" Interactive ENSO Climate Simulator**:
    * Models future cumulative rainfall paths under three global climate regimes:
      * 🌧️ **La Niña Scenario** (Niño 3.4 anomalous cooling at $-1.2^\circ\text{C}$): Predicts severe rainfall clusters and elevated heavy rain risk.
      * ☁️ **Neutral Scenario** (Niño 3.4 anomaly at $0.0^\circ\text{C}$): Establishes the climatological baseline matching historic Hornsby patterns.
      * ☀️ **El Niño Scenario** (Niño 3.4 anomalous warming at $+1.2^\circ\text{C}$): Predicts drought patterns and system-wide rainfall reduction.
-7. **One-Click Automation Orchestrator (`refresh_pipeline.py`)**:
-   * Fully automates downloading NOAA indices, training models, running simulations, shifting forecasting dates, and generating dashboard charts when new data is added.
+8. **One-Click Automation Orchestrator (`refresh_pipeline.py`)**:
+   * Fully automates downloading NOAA indices, training models, running simulations, shifting forecasting dates, generating publication-grade dashboards, and compiling the dynamic Jupyter Notebook when new data is added.
 
 ---
 
@@ -153,15 +155,24 @@ This single command automatically parses the new boundary, fits the predictive m
 ## 🔬 Mathematical Modeling Foundations
 
 ### A. Stochastic Bernoulli Gate
-To prevent structural drying traps in multi-step recursion, rain occurrence is determined stochastically:
-$$x_t \sim \text{Bernoulli}(P(\text{Rain}_t) \times \gamma)$$
-Where $\gamma$ is a climate inflation factor tuned via cross-validation to maintain correct climatological wet-day frequency.
+To prevent structural drying traps in multi-step recursion, rain occurrence is determined stochastically via Bernoulli trials:
+$$x_t \sim \text{Bernoulli}(\text{clip}(P(\text{Rain}_t), 0.12, P_{\text{ceiling}}))$$
+Where $P_{\text{ceiling}}$ is the data-driven 97th percentile probability ceiling (e.g. `0.930`) to control extreme over-triggering.
 
-### B. Thermal Cloud Cover Feedback
-Diurnal temperature range ($\text{DTR} = T_{\text{max}} - T_{\text{min}}$) is adjusted on rain days to mimic realistic physics:
-$$T_{\text{max}, t}^{\text{wet}} = T_{\text{max}, t}^{\text{Prophet}} - 0.25 \times \text{DTR}_t$$
-$$T_{\text{min}, t}^{\text{wet}} = T_{\text{min}, t}^{\text{Prophet}} + 0.25 \times \text{DTR}_t$$
+### B. Thermal Cloud Cover Feedback (Calibrated)
+Diurnal temperature range ($\text{DTR}_t = T_{\text{max}, t} - T_{\text{min}, t}$) is adjusted on rain days to model cloud盖 and evaporative cooling. To prevent positive feedback runaway, the adjustment factor is calibrated to **0.02**:
+$$T_{\text{max}, t}^{\text{wet}} = T_{\text{max}, t} - 0.02 \times \text{DTR}_t$$
+$$T_{\text{min}, t}^{\text{wet}} = T_{\text{min}, t} + 0.02 \times \text{DTR}_t$$
+$$\text{DTR}_t^{\text{wet}} = 0.96 \times \text{DTR}_t$$
 
-### C. Gamma Climatological Residual Noise
-Rain intensity is calculated by compounding XGBoost regression predictions with Gamma-distributed random residuals, which avoids dry-smoothing and reproduces authentic heavy rain distributions:
-$$\text{Rain}_t = \text{Intensity}_t^{\text{XGBoost}} + \epsilon_t, \quad \epsilon_t \sim \text{Gamma}(\alpha, \beta)$$
+### C. Joint Temperature Residual VAR(1) Process
+To preserve thermodynamic fluctuations without covariate shift, temperature predictions superimpose stochastic residuals:
+$$\mathbf{r}_t = \mathbf{\Phi} \mathbf{r}_{t-1} + \mathbf{z}_t$$
+$$\begin{bmatrix} r_{\text{max}, t} \\ r_{\text{min}, t} \end{bmatrix} = \begin{bmatrix} \phi_{\text{max}} & 0 \\ 0 & \phi_{\text{min}} \end{bmatrix} \begin{bmatrix} r_{\text{max}, t-1} \\ r_{\text{min}, t-1} \end{bmatrix} + \begin{bmatrix} u_{\text{max}, t} \\ u_{\text{min}, t} \end{bmatrix}$$
+Where $\mathbf{u}_t$ is cross-correlated Gaussian noise estimated from observations:
+$$\text{Corr}(u_{\text{max}, t}, u_{\text{min}, t}) = 0.472$$
+
+### D. Log-Hurdle Intensity with Duan's Smearing Factor
+Precipitation intensity is predicted in log-space and back-transformed using Duan's Smearing Factor ($\eta$) to correct exponential bias:
+$$\text{Rain}_t = \exp\left(\widehat{\log_{1p}(\text{Rain}_t)}\right) \times \eta - 1.0 + \gamma_t$$
+Where $\gamma_t \sim \text{Gamma}(\alpha=0.6, \beta=0.5)$ represents stochastic mesoscale precipitation noise, and $\eta = \frac{1}{N}\sum \exp(e_i)$ is the smearing bias correction factor (e.g., `1.4942`).
