@@ -241,8 +241,8 @@ def train_prophet_temp(df):
     print("TRAINING PROPHET FOR TEMPERATURE FORECASTING")
     print("="*50)
     
-    df_max = df[['Date', 'MaxTemp']].rename(columns={'Date': 'ds', 'MaxTemp': 'y'}).dropna()
-    df_min = df[['Date', 'MinTemp']].rename(columns={'Date': 'ds', 'MinTemp': 'y'}).dropna()
+    df_max = df.rename(columns={'Date': 'ds', 'MaxTemp': 'y'})[['ds', 'y']].dropna()
+    df_min = df.rename(columns={'Date': 'ds', 'MinTemp': 'y'})[['ds', 'y']].dropna()
     
     print("Fitting Prophet MaxTemp model...")
     model_max = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
@@ -257,8 +257,8 @@ def train_prophet_temp(df):
     future_df = pd.DataFrame({'ds': future_dates})
     
     print("Predicting daily temperatures for the next 12 months...")
-    forecast_max = model_max.predict(future_df)[['ds', 'yhat']].rename(columns={'ds': 'Date', 'yhat': 'MaxTemp'})
-    forecast_min = model_min.predict(future_df)[['ds', 'yhat']].rename(columns={'ds': 'Date', 'yhat': 'MinTemp'})
+    forecast_max = model_max.predict(future_df).rename(columns={'ds': 'Date', 'yhat': 'MaxTemp'})[['Date', 'MaxTemp']]
+    forecast_min = model_min.predict(future_df).rename(columns={'ds': 'Date', 'yhat': 'MinTemp'})[['Date', 'MinTemp']]
     future_temp = pd.merge(forecast_max, forecast_min, on='Date')
     
     # Plot the predicted baseline temperatures
@@ -396,8 +396,8 @@ def predict_future_recursive(df_ml, future_temp, model_max, model_min, clf, reg,
     # Extract baseline predictions on the training set to estimate joint temperature residuals
     print("Calibrating Stochastic Temperature Residual Generator...")
     train_future_df = pd.DataFrame({'ds': df_ml['Date']})
-    train_hat_max = model_max.predict(train_future_df)[['ds', 'yhat']].rename(columns={'ds': 'Date', 'yhat': 'MaxTemp_hat'})
-    train_hat_min = model_min.predict(train_future_df)[['ds', 'yhat']].rename(columns={'ds': 'Date', 'yhat': 'MinTemp_hat'})
+    train_hat_max = model_max.predict(train_future_df).rename(columns={'ds': 'Date', 'yhat': 'MaxTemp_hat'})[['Date', 'MaxTemp_hat']]
+    train_hat_min = model_min.predict(train_future_df).rename(columns={'ds': 'Date', 'yhat': 'MinTemp_hat'})[['Date', 'MinTemp_hat']]
     
     train_resid = pd.merge(df_ml[['Date', 'MaxTemp', 'MinTemp']], train_hat_max, on='Date')
     train_resid = pd.merge(train_resid, train_hat_min, on='Date')
@@ -415,7 +415,7 @@ def predict_future_recursive(df_ml, future_temp, model_max, model_min, clf, reg,
     max_noise_std = np.sqrt(max_var * (1 - max_phi**2)) if max_var > 0 else 1.2
     min_noise_std = np.sqrt(min_var * (1 - min_phi**2)) if min_var > 0 else 1.0
     
-    resid_corr = train_resid[['Max_Resid', 'Min_Resid']].corr().iloc[0, 1]
+    resid_corr = train_resid['Max_Resid'].corr(train_resid['Min_Resid'])
     if pd.isna(resid_corr): resid_corr = 0.75
     
     print(f"  MaxTemp AR(1) Phi: {max_phi:.3f} | White Noise Std: {max_noise_std:.3f}°C")
